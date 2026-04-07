@@ -1,6 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
-import { supabase } from "@/lib/supabase";
+import { supabase } from "./supabase";
 
 const BLOCKS = ["A", "B", "C", "D", "E", "F"];
 const BLOCK_COLORS: Record<string, string> = {
@@ -8,11 +8,11 @@ const BLOCK_COLORS: Record<string, string> = {
 };
 
 type Set = { done: boolean; weight: string; reps: string };
-type Exercise = { block: string; name: string; sets: number; reps: string };
+type Exercise = { block: string; name: string; sets: number; reps: string; noWeight?: boolean };
 type Program = { id: string; name: string; day: string; exercises: Exercise[] };
-type LogExercise = { block: string; name: string; sets: { weight: string; reps: string }[] };
+type LogExercise = { block: string; name: string; sets: { weight: string; reps: string }[]; noWeight?: boolean };
 type Log = { id: string; name: string; date: string; exercises: LogExercise[] };
-type ActiveEx = { block: string; name: string; sets: Set[] };
+type ActiveEx = { block: string; name: string; sets: Set[]; noWeight?: boolean };
 type ActiveWO = { name: string; date: string; exercises: ActiveEx[] };
 type User = { id: string; email: string };
 
@@ -45,9 +45,8 @@ export default function Home() {
   const [editingProg, setEditingProg] = useState<Program | null>(null);
   const [progName, setProgName] = useState("");
   const [progDay, setProgDay] = useState("");
-  const [progExs, setProgExs] = useState<Exercise[]>([{ block: "A", name: "", sets: 3, reps: "8" }]);
+  const [progExs, setProgExs] = useState<Exercise[]>([{ block: "A", name: "", sets: 3, reps: "8", noWeight: false }]);
   const [activeWO, setActiveWO] = useState<ActiveWO | null>(null);
-  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -61,9 +60,7 @@ export default function Home() {
     return () => subscription.unsubscribe();
   }, []);
 
-  useEffect(() => {
-    if (user) { loadPrograms(); loadLogs(); }
-  }, [user]);
+  useEffect(() => { if (user) { loadPrograms(); loadLogs(); } }, [user]);
 
   const loadPrograms = async () => {
     const { data } = await supabase.from("programs").select("*").order("created_at");
@@ -82,10 +79,8 @@ export default function Home() {
       if (error) setAuthError(error.message);
       else {
         const { data: { session } } = await supabase.auth.getSession();
-        if (session?.user) {
-          await supabase.from("profiles").insert({ id: session.user.id, email: authEmail });
-          setUser({ id: session.user.id, email: authEmail });
-        } else setAuthError("Check your email to confirm your account.");
+        if (session?.user) setUser({ id: session.user.id, email: authEmail });
+        else setAuthError("Check your email to confirm your account.");
       }
     } else {
       const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
@@ -113,11 +108,17 @@ export default function Home() {
     await loadPrograms(); setShowProgModal(false);
   };
 
-  const openNewProg = () => { setEditingProg(null); setProgName(""); setProgDay(""); setProgExs([{ block: "A", name: "", sets: 3, reps: "8" }]); setShowProgModal(true); };
+  const openNewProg = () => { setEditingProg(null); setProgName(""); setProgDay(""); setProgExs([{ block: "A", name: "", sets: 3, reps: "8", noWeight: false }]); setShowProgModal(true); };
   const openEditProg = (p: Program) => { setEditingProg(p); setProgName(p.name); setProgDay(p.day); setProgExs([...p.exercises]); setShowProgModal(true); };
 
   const startWO = (prog: Program) => {
-    setActiveWO({ name: prog.name, date: today(), exercises: prog.exercises.map(e => ({ block: e.block, name: e.name, sets: Array.from({ length: e.sets }, () => ({ done: false, weight: "", reps: e.reps })) })) });
+    setActiveWO({
+      name: prog.name, date: today(),
+      exercises: prog.exercises.map(e => ({
+        block: e.block, name: e.name, noWeight: e.noWeight || false,
+        sets: Array.from({ length: e.sets }, () => ({ done: false, weight: "", reps: e.noWeight ? "1" : e.reps }))
+      }))
+    });
     setShowWOModal(true);
   };
 
@@ -131,7 +132,10 @@ export default function Home() {
 
   const finishWO = async () => {
     if (!activeWO) return;
-    const logExs = activeWO.exercises.map(e => ({ block: e.block, name: e.name, sets: e.sets.filter(s => s.weight || s.reps).map(s => ({ weight: s.weight || "0", reps: s.reps || "0" })) })).filter(e => e.sets.length > 0);
+    const logExs = activeWO.exercises.map(e => ({
+      block: e.block, name: e.name, noWeight: e.noWeight,
+      sets: e.sets.filter(s => s.done).map(s => ({ weight: s.weight || "0", reps: s.reps || "0" }))
+    })).filter(e => e.sets.length > 0);
     if (logExs.length > 0) {
       await supabase.from("logs").insert({ name: activeWO.name, date: activeWO.date, exercises: logExs, user_id: user!.id });
       await loadLogs();
@@ -142,6 +146,11 @@ export default function Home() {
   const updateSet = (ei: number, si: number, field: "weight" | "reps" | "done", val: string | boolean) => {
     if (!activeWO) return;
     setActiveWO({ ...activeWO, exercises: activeWO.exercises.map((e, i) => i !== ei ? e : { ...e, sets: e.sets.map((s, j) => j !== si ? s : { ...s, [field]: val }) }) });
+  };
+
+  const completeAllSets = (ei: number) => {
+    if (!activeWO) return;
+    setActiveWO({ ...activeWO, exercises: activeWO.exercises.map((e, i) => i !== ei ? e : { ...e, sets: e.sets.map(s => ({ ...s, done: true })) }) });
   };
 
   const addSet = (ei: number) => {
@@ -170,17 +179,14 @@ export default function Home() {
   const inputStyle = { width: "100%", padding: "12px 14px", background: d.input, border: `0.5px solid ${d.cardBorder}`, borderRadius: 10, fontSize: 15, color: d.textPrimary, fontFamily: "inherit" };
   const labelStyle = { display: "block" as const, fontSize: 13, fontWeight: 500, color: d.textSecondary, marginBottom: 5 };
   const sectionLabel = { fontSize: 12, fontWeight: 500, color: d.textSecondary, textTransform: "uppercase" as const, letterSpacing: 0.5, marginBottom: 8, padding: "0 4px" };
-
   const font = { fontFamily: "-apple-system,'SF Pro Display','Helvetica Neue',sans-serif" };
 
-  // AUTH LOADING
   if (authLoading) return (
     <div style={{ ...font, maxWidth: 430, margin: "0 auto", minHeight: "100vh", background: d.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <p style={{ color: d.textSecondary, fontSize: 15 }}>Loading...</p>
     </div>
   );
 
-  // AUTH SCREEN
   if (!user) return (
     <div style={{ ...font, maxWidth: 430, margin: "0 auto", minHeight: "100vh", background: d.bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 24px" }}>
       <div style={{ marginBottom: 40, textAlign: "center" }}>
@@ -205,7 +211,6 @@ export default function Home() {
     </div>
   );
 
-  // MAIN APP
   return (
     <div style={{ ...font, maxWidth: 430, margin: "0 auto", minHeight: "100vh", background: d.bg, paddingBottom: 80, position: "relative" }}>
 
@@ -292,7 +297,12 @@ export default function Home() {
                     {Object.entries(blocks).map(([b, exs]) => (
                       <div key={b} style={{ padding: "10px 16px", borderBottom: `0.5px solid ${d.separator}`, display: "flex", gap: 12 }}>
                         <BlockDot block={b} size={26} />
-                        <div>{exs.map(e => (<div key={e.name} style={{ marginBottom: 4 }}><p style={{ fontSize: 13, fontWeight: 500, color: d.textPrimary, margin: 0 }}>{e.name}</p><p style={{ fontSize: 12, color: d.textSecondary, margin: "2px 0 0" }}>{e.sets.filter(s => s.weight).map(s => `${s.weight}kg×${s.reps}`).join(" / ")}</p></div>))}</div>
+                        <div>{exs.map(e => (<div key={e.name} style={{ marginBottom: 4 }}>
+                          <p style={{ fontSize: 13, fontWeight: 500, color: d.textPrimary, margin: 0 }}>{e.name}</p>
+                          <p style={{ fontSize: 12, color: d.textSecondary, margin: "2px 0 0" }}>
+                            {e.noWeight ? `${e.sets.length} sets completed` : e.sets.filter(s => s.weight).map(s => `${s.weight}kg×${s.reps}`).join(" / ")}
+                          </p>
+                        </div>))}</div>
                       </div>
                     ))}
                   </div>
@@ -351,20 +361,33 @@ export default function Home() {
                 {progExs.map((ex, i) => (
                   <div key={i} style={{ background: "#2C2C2E", borderRadius: 10, padding: 12, marginBottom: 10, position: "relative" }}>
                     <button onClick={() => setProgExs(progExs.filter((_, j) => j !== i))} style={{ position: "absolute", top: 8, right: 8, color: "#FF453A", fontSize: 18, background: "transparent", border: "none", cursor: "pointer" }}>×</button>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
                       <div style={{ flex: "0 0 60px" }}><label style={labelStyle}>Block</label>
                         <select style={{ ...inputStyle, background: d.inputAlt }} value={ex.block} onChange={e => setProgExs(progExs.map((x, j) => j === i ? { ...x, block: e.target.value } : x))}>
                           {BLOCKS.map(b => <option key={b} value={b}>{b}</option>)}
                         </select>
                       </div>
                       <div style={{ flex: "1 1 120px" }}><label style={labelStyle}>Exercise</label><input style={{ ...inputStyle, background: d.inputAlt }} placeholder="e.g. Bench Press" value={ex.name} onChange={e => setProgExs(progExs.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} /></div>
-                      <div style={{ flex: "0 0 52px" }}><label style={labelStyle}>Sets</label><input style={{ ...inputStyle, background: d.inputAlt }} type="number" min={1} max={10} value={ex.sets} onChange={e => setProgExs(progExs.map((x, j) => j === i ? { ...x, sets: parseInt(e.target.value) || 3 } : x))} /></div>
-                      <div style={{ flex: "0 0 52px" }}><label style={labelStyle}>Reps</label><input style={{ ...inputStyle, background: d.inputAlt }} placeholder="8" value={ex.reps} onChange={e => setProgExs(progExs.map((x, j) => j === i ? { ...x, reps: e.target.value } : x))} /></div>
+                      {!ex.noWeight && <>
+                        <div style={{ flex: "0 0 52px" }}><label style={labelStyle}>Sets</label><input style={{ ...inputStyle, background: d.inputAlt }} type="number" min={1} max={10} value={ex.sets} onChange={e => setProgExs(progExs.map((x, j) => j === i ? { ...x, sets: parseInt(e.target.value) || 3 } : x))} /></div>
+                        <div style={{ flex: "0 0 52px" }}><label style={labelStyle}>Reps</label><input style={{ ...inputStyle, background: d.inputAlt }} placeholder="8" value={ex.reps} onChange={e => setProgExs(progExs.map((x, j) => j === i ? { ...x, reps: e.target.value } : x))} /></div>
+                      </>}
+                      {ex.noWeight && <>
+                        <div style={{ flex: "0 0 52px" }}><label style={labelStyle}>Sets</label><input style={{ ...inputStyle, background: d.inputAlt }} type="number" min={1} max={10} value={ex.sets} onChange={e => setProgExs(progExs.map((x, j) => j === i ? { ...x, sets: parseInt(e.target.value) || 3 } : x))} /></div>
+                      </>}
+                    </div>
+                    {/* No weight toggle */}
+                    <div onClick={() => setProgExs(progExs.map((x, j) => j === i ? { ...x, noWeight: !x.noWeight } : x))}
+                      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: d.inputAlt, borderRadius: 8, cursor: "pointer" }}>
+                      <span style={{ fontSize: 13, color: d.textPrimary }}>Complete only (no weight)</span>
+                      <div style={{ width: 44, height: 26, borderRadius: 13, background: ex.noWeight ? "#34C759" : "#3A3A3C", position: "relative", transition: "background 0.2s" }}>
+                        <div style={{ position: "absolute", top: 3, left: ex.noWeight ? 21 : 3, width: 20, height: 20, borderRadius: "50%", background: "white", transition: "left 0.2s" }} />
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
-              <button onClick={() => setProgExs([...progExs, { block: "A", name: "", sets: 3, reps: "8" }])} style={{ width: "100%", padding: 13, background: "transparent", color: "#007AFF", border: `0.5px solid ${d.cardBorder}`, borderRadius: 12, fontSize: 15, fontWeight: 500, cursor: "pointer", marginBottom: 8, fontFamily: "inherit" }}>+ Add exercise</button>
+              <button onClick={() => setProgExs([...progExs, { block: "A", name: "", sets: 3, reps: "8", noWeight: false }])} style={{ width: "100%", padding: 13, background: "transparent", color: "#007AFF", border: `0.5px solid ${d.cardBorder}`, borderRadius: 12, fontSize: 15, fontWeight: 500, cursor: "pointer", marginBottom: 8, fontFamily: "inherit" }}>+ Add exercise</button>
               <button onClick={saveProgram} style={{ width: "100%", padding: 14, background: "#007AFF", color: "white", border: "none", borderRadius: 12, fontSize: 15, fontWeight: 600, cursor: "pointer", marginBottom: 8, fontFamily: "inherit" }}>Save program</button>
               {editingProg && <button onClick={deleteProg} style={{ width: "100%", padding: 13, background: "transparent", color: "#FF453A", border: `0.5px solid ${d.cardBorder}`, borderRadius: 12, fontSize: 15, fontWeight: 500, cursor: "pointer", fontFamily: "inherit" }}>Delete program</button>}
             </div>
@@ -387,26 +410,50 @@ export default function Home() {
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}><BlockDot block={b} /><span style={{ fontSize: 16, fontWeight: 600, color: d.textPrimary }}>Block {b}</span></div>
                 {items.map(({ ex, ei }) => {
                   const last = getLastSets(ex.name);
+                  const allDone = ex.sets.every(s => s.done);
                   return (
                     <div key={ei} style={{ ...cardStyle, marginBottom: 8 }}>
                       <div style={{ padding: "11px 14px", background: "#2C2C2E", borderBottom: `0.5px solid ${d.separator}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                         <span style={{ fontSize: 14, fontWeight: 600, color: d.textPrimary }}>{ex.name}</span>
-                        <span style={{ fontSize: 12, color: d.textSecondary }}>{last ? `Last: ${last.slice(0, 2).map(s => `${s.weight}×${s.reps}`).join(", ")}` : "No history"}</span>
+                        {ex.noWeight
+                          ? <span style={{ fontSize: 12, color: d.textSecondary }}>{ex.sets.length} sets</span>
+                          : <span style={{ fontSize: 12, color: d.textSecondary }}>{last ? `Last: ${last.slice(0, 2).map(s => `${s.weight}×${s.reps}`).join(", ")}` : "No history"}</span>
+                        }
                       </div>
-                      <div style={{ padding: "8px 12px 4px" }}>
-                        <div style={{ display: "grid", gridTemplateColumns: "32px 1fr 1fr 32px", gap: 6, marginBottom: 4 }}>
-                          <div /><div style={{ textAlign: "center", fontSize: 11, color: d.textSecondary }}>kg</div><div style={{ textAlign: "center", fontSize: 11, color: d.textSecondary }}>reps</div><div />
-                        </div>
-                        {ex.sets.map((set, si) => (
-                          <div key={si} style={{ display: "grid", gridTemplateColumns: "32px 1fr 1fr 32px", gap: 6, marginBottom: 6, alignItems: "center" }}>
-                            <div onClick={() => updateSet(ei, si, "done", !set.done)} style={{ width: 28, height: 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 500, cursor: "pointer", border: `1.5px solid ${set.done ? "#34C759" : "#3A3A3C"}`, background: set.done ? "#34C759" : "transparent", color: set.done ? "white" : d.textSecondary }}>{set.done ? "✓" : si + 1}</div>
-                            <input style={{ padding: "8px 6px", background: "#2C2C2E", border: `0.5px solid ${d.cardBorder}`, borderRadius: 8, fontSize: 15, color: d.textPrimary, fontFamily: "inherit", textAlign: "center", width: "100%" }} placeholder={last?.[si]?.weight || "--"} value={set.weight} onChange={e => updateSet(ei, si, "weight", e.target.value)} />
-                            <input style={{ padding: "8px 6px", background: "#2C2C2E", border: `0.5px solid ${d.cardBorder}`, borderRadius: 8, fontSize: 15, color: d.textPrimary, fontFamily: "inherit", textAlign: "center", width: "100%" }} placeholder={last?.[si]?.reps || "--"} value={set.reps} onChange={e => updateSet(ei, si, "reps", e.target.value)} />
-                            <div />
+
+                      {ex.noWeight ? (
+                        /* Complete-only view */
+                        <div style={{ padding: "16px 14px" }}>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                            {ex.sets.map((set, si) => (
+                              <div key={si} onClick={() => updateSet(ei, si, "done", !set.done)}
+                                style={{ width: 44, height: 44, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 600, cursor: "pointer", border: `1.5px solid ${set.done ? "#34C759" : "#3A3A3C"}`, background: set.done ? "rgba(52,199,89,0.15)" : "transparent", color: set.done ? "#34C759" : d.textSecondary }}>
+                                {set.done ? "✓" : si + 1}
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                        <button onClick={() => addSet(ei)} style={{ color: "#007AFF", fontSize: 13, fontWeight: 500, background: "transparent", border: "none", cursor: "pointer", padding: "4px 0", fontFamily: "inherit" }}>+ Set</button>
-                      </div>
+                          <button onClick={() => completeAllSets(ei)}
+                            style={{ width: "100%", padding: "12px", background: allDone ? "rgba(52,199,89,0.15)" : "#2C2C2E", border: `1.5px solid ${allDone ? "#34C759" : "#3A3A3C"}`, borderRadius: 10, color: allDone ? "#34C759" : d.textPrimary, fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                            {allDone ? "✓ Completed" : "Complete all sets"}
+                          </button>
+                        </div>
+                      ) : (
+                        /* Weight + reps view */
+                        <div style={{ padding: "8px 12px 4px" }}>
+                          <div style={{ display: "grid", gridTemplateColumns: "32px 1fr 1fr 32px", gap: 6, marginBottom: 4 }}>
+                            <div /><div style={{ textAlign: "center", fontSize: 11, color: d.textSecondary }}>kg</div><div style={{ textAlign: "center", fontSize: 11, color: d.textSecondary }}>reps</div><div />
+                          </div>
+                          {ex.sets.map((set, si) => (
+                            <div key={si} style={{ display: "grid", gridTemplateColumns: "32px 1fr 1fr 32px", gap: 6, marginBottom: 6, alignItems: "center" }}>
+                              <div onClick={() => updateSet(ei, si, "done", !set.done)} style={{ width: 28, height: 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 500, cursor: "pointer", border: `1.5px solid ${set.done ? "#34C759" : "#3A3A3C"}`, background: set.done ? "#34C759" : "transparent", color: set.done ? "white" : d.textSecondary }}>{set.done ? "✓" : si + 1}</div>
+                              <input style={{ padding: "8px 6px", background: "#2C2C2E", border: `0.5px solid ${d.cardBorder}`, borderRadius: 8, fontSize: 15, color: d.textPrimary, fontFamily: "inherit", textAlign: "center", width: "100%" }} placeholder={last?.[si]?.weight || "--"} value={set.weight} onChange={e => updateSet(ei, si, "weight", e.target.value)} />
+                              <input style={{ padding: "8px 6px", background: "#2C2C2E", border: `0.5px solid ${d.cardBorder}`, borderRadius: 8, fontSize: 15, color: d.textPrimary, fontFamily: "inherit", textAlign: "center", width: "100%" }} placeholder={last?.[si]?.reps || "--"} value={set.reps} onChange={e => updateSet(ei, si, "reps", e.target.value)} />
+                              <div />
+                            </div>
+                          ))}
+                          <button onClick={() => addSet(ei)} style={{ color: "#007AFF", fontSize: 13, fontWeight: 500, background: "transparent", border: "none", cursor: "pointer", padding: "4px 0", fontFamily: "inherit" }}>+ Set</button>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
